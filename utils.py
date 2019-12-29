@@ -9,35 +9,19 @@ import multiprocessing
 workers = multiprocessing.cpu_count()//2
 import tensorflow as tf
 
-if tf.__version__[0] == "2":
-    _IS_TF_2 = True
-    import tensorflow.keras.backend as K
-    from tensorflow.keras.utils import Sequence
-    from tensorflow.keras.optimizers import Adam, SGD, RMSprop
-    from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping, LambdaCallback
-    from tensorflow.keras.layers import *
-    from subpixel import *
-    from tensorflow.keras.models import Model, Sequential
-    from tensorflow.keras.callbacks import TensorBoard
-    from tensorflow.keras.preprocessing.image import ImageDataGenerator
-    from tensorflow.python.client import device_lib
-    from tensorflow.keras.regularizers import l2
-    from tensorflow.keras.utils import to_categorical
-else:
-    _IS_TF_2 = False
-    import keras
-    import keras.backend as K
-    from keras.utils.data_utils import Sequence
-    from keras.optimizers import Adam, SGD, RMSprop
-    from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping, LambdaCallback
-    from keras.layers import *
-    from subpixel import *
-    from keras.models import Model, Sequential
-    from keras.callbacks import TensorBoard
-    from keras.preprocessing.image import ImageDataGenerator
-    from tensorflow.python.client import device_lib
-    from keras.regularizers import l2
-    from keras.utils import to_categorical
+_IS_TF_2 = True
+import tensorflow.keras.backend as K
+from tensorflow.keras.utils import Sequence
+from tensorflow.keras.optimizers import Adam, SGD, RMSprop
+from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping, LambdaCallback
+from tensorflow.keras.layers import *
+from subpixel import *
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras.callbacks import TensorBoard
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.python.client import device_lib
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.utils import to_categorical
     
 from collections import Counter
 
@@ -71,10 +55,9 @@ def plot_confusion_matrix(cm, classes, normalize=False, title='Confusion matrix'
     return cm
 
 # Fully connected CRF post processing function
-def do_crf(im, mask, zero_unsure=True):
+def do_crf(im, mask, zero_unsure=True, n_labels=21):
     colors, labels = np.unique(mask, return_inverse=True)
     image_size = mask.shape[:2]
-    n_labels = len(set(labels.flat))
     d = dcrf.DenseCRF2D(image_size[1], image_size[0], n_labels)  # width, height, nlabels
     U = unary_from_labels(labels, n_labels, gt_prob=.7, zero_unsure=zero_unsure)
     d.setUnaryEnergy(U)
@@ -96,56 +79,36 @@ def get_available_gpus():
     return [x.name for x in local_device_protos if x.device_type == 'GPU']
     
 
-def get_VOC2012_classes():
-    PASCAL_VOC_classes = {
-        0: 'background', 
-        1: 'airplane',
-        2: 'bicycle',
-        3: 'bird', 
-        4: 'boat',
-        5: 'bottle',
-        6: 'bus',
-        7: 'car',
-        8: 'cat',
-        9: 'chair',
-        10: 'cow',
-        11: 'table',
-        12: 'dog',
-        13: 'horse',
-        14: 'motorbike',
-        15: 'person',
-        16: 'potted_plant',
-        17: 'sheep',
-        18: 'sofa',
-        19 : 'train',
-        20 : 'tv',
-        21 : 'void'
-    }
-    return PASCAL_VOC_classes
-
-
 def sparse_crossentropy_ignoring_last_label(y_true, y_pred):
     nb_classes = K.int_shape(y_pred)[-1]
-    y_true = K.one_hot(tf.to_int32(y_true[:,:,0]), nb_classes+1)[:,:,:-1]
+    if nb_classes is None:
+        nb_classes = tf.compat.v1.to_int32(0)
+    y_true = K.one_hot(tf.compat.v1.to_int32(y_true[:,:,0]), nb_classes+1)[:,:,:-1]
     return K.categorical_crossentropy(y_true, y_pred)
+
 
 def sparse_accuracy_ignoring_last_label(y_true, y_pred):
     nb_classes = K.int_shape(y_pred)[-1]
+    if nb_classes is None:
+        nb_classes = tf.compat.v1.to_int64(0)
     y_pred = K.reshape(y_pred, (-1, nb_classes))
-    y_true = tf.to_int64(K.flatten(y_true))
+    y_true = tf.compat.v1.to_int64(K.flatten(y_true))
     legal_labels = ~K.equal(y_true, nb_classes)
-    return K.sum(tf.to_float(legal_labels & K.equal(y_true, 
-                                                    K.argmax(y_pred, axis=-1)))) / K.sum(tf.to_float(legal_labels))
+    return K.sum(tf.compat.v1.to_float(legal_labels & K.equal(y_true, 
+                                                    K.argmax(y_pred, axis=-1)))) / K.sum(tf.compat.v1.to_float(legal_labels))
+
 def Jaccard(y_true, y_pred):
     nb_classes = K.int_shape(y_pred)[-1]
     iou = []
     pred_pixels = K.argmax(y_pred, axis=-1)
+    if nb_classes is None:
+        return 0
     for i in range(0, nb_classes): # exclude first label (background) and last label (void)
         true_labels = K.equal(y_true[:,:,0], i)
         pred_labels = K.equal(pred_pixels, i)
-        inter = tf.to_int32(true_labels & pred_labels)
-        union = tf.to_int32(true_labels | pred_labels)
-        legal_batches = K.sum(tf.to_int32(true_labels), axis=1)>0
+        inter = tf.compat.v1.to_int32(true_labels & pred_labels)
+        union = tf.compat.v1.to_int32(true_labels | pred_labels)
+        legal_batches = K.sum(tf.compat.v1.to_int32(true_labels), axis=1)>0
         ious = K.sum(inter, axis=1)/K.sum(union, axis=1)
         if _IS_TF_2:
             iou.append(K.mean(ious[legal_batches]))
@@ -166,17 +129,21 @@ class SegModel:
         self.crop = False
             
     
-    def create_seg_model(self, net, n=21, backbone='mobilenetv2', load_weights=False, multi_gpu=False):
+    def create_seg_model(self, net, n_classes=21, backbone='mobilenetv2', load_weights=False, multi_gpu=False):
         
         '''
         Net is:
         1. original deeplab v3+
         2. original deeplab v3+ and subpixel upsampling layer
         '''
-        
-        model = Deeplabv3(weights=None, input_tensor=None, infer=False,
-                          input_shape=self.sz + (3,), classes=21,
-                          backbone=backbone, OS=16, alpha=1)
+        model = Deeplabv3(weights = None,
+                          input_tensor = None,
+                          input_shape = self.sz + (3,),
+                          classes = n_classes,
+                          # infer=False,
+                          backbone = backbone,
+                          OS=16,
+                          alpha=1)
         
         base_model = Model(model.input, model.layers[-5].output)
         self.net = net
@@ -186,13 +153,13 @@ class SegModel:
         else:
             scale = 8
         if net == 'original':
-            x = Conv2D(n, (1, 1), padding='same', name='conv_upsample')(base_model.output)
-            x = Lambda(lambda x: K.tf.image.resize_bilinear(x,size=(self.sz[0],self.sz[1])))(x)
+            x = Conv2D(n_classes, (1, 1), padding='same', name='conv_upsample')(base_model.output)
+            x = Lambda(lambda x: tf.compat.v1.image.resize_bilinear(x,size=(self.sz[0],self.sz[1])))(x)
             x = Reshape((self.sz[0]*self.sz[1], -1)) (x)
             x = Activation('softmax', name = 'pred_mask')(x)
             model = Model(base_model.input, x, name='deeplabv3p')
         elif net == 'subpixel':
-            x = Subpixel(n, 1, scale, padding='same')(base_model.output)
+            x = Subpixel(n_classes, 1, scale, padding='same')(base_model.output)
             x = Reshape((self.sz[0]*self.sz[1], -1)) (x)
             x = Activation('softmax', name = 'pred_mask')(x)
             model = Model(base_model.input, x, name='deeplabv3p_subpixel')
@@ -204,10 +171,10 @@ class SegModel:
                 layer.set_weights([w, b])
                 
         if load_weights:
-            model.load_weights('weights/{}_{}.h5'.format(backbone, net))
+            model.load_weights('weights/{}_{}.h5'.format(backbone, net), by_name=True)
 
         if multi_gpu:
-            from keras.utils import multi_gpu_model
+            from tensorflow.keras.utils import multi_gpu_model
             model = multi_gpu_model(model, gpus = len(get_available_gpus()))
             
         self.model = model
@@ -215,20 +182,26 @@ class SegModel:
 
     def create_generators(self, crop_shape=False, mode='train', do_ahisteq=True, n_classes=21, horizontal_flip=True, 
                           vertical_flip=False, blur=False, with_bg=True, brightness=0.1, rotation=5.0, 
-                          zoom=0.1, validation_split=.2, seed=7):
-                
-        generator = SegmentationGenerator(folder = self.mainpath, mode = mode, n_classes = n_classes, do_ahisteq = do_ahisteq,
-                                       batch_size=self.batch_size, resize_shape=self.sz[::-1], crop_shape=crop_shape, 
-                                       horizontal_flip=horizontal_flip, vertical_flip=vertical_flip, blur = blur,
-                                       brightness=brightness, rotation=rotation, zoom=zoom,
-                                       validation_split = validation_split, seed = seed)
+                          zoom=0.1, seed=7):
+        
+        generator = SegmentationGenerator(folder = self.mainpath,
+                                          mode = mode,
+                                          n_classes = n_classes,
+                                          do_ahisteq = do_ahisteq,
+                                          batch_size = self.batch_size,
+                                          resize_shape = self.sz[::-1],
+                                          crop_shape = crop_shape, 
+                                          horizontal_flip = horizontal_flip,
+                                          vertical_flip = vertical_flip,
+                                          blur = blur,
+                                          seed = seed)
                 
         return generator
 
     def load_weights(self, model):
-        model.load_weights(self.modelpath)
+        model.load_weights(self.modelpath, by_name=True)
         
-    def train_generator(self, model, train_generator, valid_generator, callbacks, mp = True):
+    def train_generator(self, model, train_generator, valid_generator, callbacks, mp = False):
         steps = len(train_generator)
         h = model.fit_generator(train_generator,
                                 steps_per_epoch=steps, 
@@ -241,9 +214,15 @@ class SegModel:
         return h
     
     def train(self, model, X, y, val_data, tf_board = False, plot_train_process = True):
-        h = model.fit(X, y, validation_data = val_data, verbose=1, 
-                      batch_size = self.batch_size, epochs = self.epochs, 
-                      callbacks = self.build_callbacks(tf_board = tf_board, plot_process = plot_train_process))
+        h = model.fit(X, y,
+                      validation_data = val_data,
+                      verbose = 1, 
+                      batch_size = self.batch_size,
+                      epochs = self.epochs, 
+                      callbacks = self.build_callbacks(
+                          tf_board = tf_board,
+                          plot_process = plot_train_process
+                      ))
         return h
     
     @classmethod
@@ -256,27 +235,26 @@ class SegModel:
     
 class SegmentationGenerator(Sequence):
     
-    def __init__(self, folder='/workspace/datasets/', mode='train', n_classes=21, batch_size=1, resize_shape=None, 
-                 validation_split = .1, seed = 7, crop_shape=(640, 320), horizontal_flip=True, blur = 0,
+    def __init__(self, folder='/workspace/datasets/', mode='train', n_classes=21, batch_size=1, resize_shape=None, seed = 7, crop_shape=(640, 320), horizontal_flip=True, blur = 0,
                  vertical_flip=0, brightness=0.1, rotation=5.0, zoom=0.1, do_ahisteq = True):
         
         self.blur = blur
         self.histeq = do_ahisteq
-        self.image_path_list = sorted(glob.glob(os.path.join(folder, 'JPEGImages', 'train', '*')))
-        self.label_path_list = sorted(glob.glob(os.path.join(folder, 'SegmentationClassAug', '*')))
+        self.image_path_list = sorted(glob.glob(os.path.join(folder, mode, 'JPEGImages', '*')))
+        self.label_path_list = sorted(glob.glob(os.path.join(folder, mode, 'SegmentationClassAug', '*')))
 
         np.random.seed(seed)
         
-        n_images_to_select = round(len(self.image_path_list) * validation_split)
-        x = np.random.permutation(len(self.image_path_list))[:n_images_to_select]
-        if mode == 'train':
-            x = np.setxor1d(x, np.arange(len(self.image_path_list)))
+        #n_images_to_select = round(len(self.image_path_list) * validation_split)
+        x = np.random.permutation(len(self.image_path_list))#[:n_images_to_select]
+        #if mode == 'train':
+        #    x = np.setxor1d(x, np.arange(len(self.image_path_list)))
             
         self.image_path_list = [self.image_path_list[j] for j in x]
         self.label_path_list = [self.label_path_list[j] for j in x]
         
         if mode == 'test':
-            self.image_path_list = sorted(glob.glob(os.path.join(folder, 'JPEGImages', 'test', '*')))[:100]
+            self.image_path_list = sorted(glob.glob(os.path.join(folder, 'test', 'JPEGImages', '*')))[:100]
         
         self.mode = mode
         self.n_classes = n_classes
@@ -312,10 +290,10 @@ class SegmentationGenerator(Sequence):
         for n, (image_path, label_path) in enumerate(zip(self.image_path_list[i*self.batch_size:(i+1)*self.batch_size], 
                                                         self.label_path_list[i*self.batch_size:(i+1)*self.batch_size])):
             
-            image = cv2.imread(image_path, 1)
-            label = cv2.imread(label_path, 0)
+            image = cv2.imread(image_path, 1) # read color results in [B, G, R] per Pixel
+            label = cv2.imread(label_path, 0) # read grayscale results in one Number per Pixel
             labels = np.unique(label)
-            
+
             if self.blur and random.randint(0,1):
                 image = cv2.GaussianBlur(image, (self.blur, self.blur), 0)
 
